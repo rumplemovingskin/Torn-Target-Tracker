@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torn Target Tracker</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-top">
+                <h1>Torn Target Tracker</h1>
+                <div class="player-status">
+                    <div class="player-bars">
+                        <div class="bar-container">
+                            <div class="bar-label">Energy</div>
+                            <div class="progress-bar">
+                                <div id="energy-bar" class="progress-fill"></div>
+                                <span id="energy-text">0/100</span>
+                            </div>
+                        </div>
+                        <div class="bar-container">
+                            <div class="bar-label">Nerve</div>
+                            <div class="progress-bar">
+                                <div id="nerve-bar" class="progress-fill"></div>
+                                <span id="nerve-text">0/100</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cooldowns">
+                        <span class="cooldown-item">
+                            <span class="cooldown-label">Drug CD:</span>
+                            <span id="drug-cooldown">00:00:00</span>
+                        </span>
+                        <span class="cooldown-item">
+                            <span class="cooldown-label">Booster CD:</span>
+                            <span id="booster-cooldown">00:00:00</span>
+                        </span>
+                    </div>
+                </div>
+            </div>
+            <div class="nav-tabs">
+                <button class="tab-btn active" data-tab="targets">Targets</button>
+                <button class="tab-btn" data-tab="settings">Settings</button>
+                <div class="status-container">
+                    <span id="api-status" class="status-indicator">Not connected</span>
+                    <span id="api-rate-display" class="rate-indicator">0/100 req/min</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- Targets Tab Content -->
+            <div class="tab-content active" id="targets-tab">
+                <div class="control-panel">
+                    <div class="target-add">
+                        <input type="text" id="target-id" placeholder="Enter target ID">
+                        <button id="add-target">Add Target</button>
+                    </div>
+                    <div class="filters">
+                        <select id="filter-status">
+                            <option value="all">All Statuses</option>
+                            <option value="online">Online</option>
+                            <option value="offline">Offline</option>
+                            <option value="hospital">In Hospital</option>
+                            <option value="jail">In Jail</option>
+                            <option value="traveling">Traveling</option>
+                        </select>
+                        <select id="filter-sort">
+                            <option value="level-asc">Level (Low to High)</option>
+                            <option value="level-desc">Level (High to Low)</option>
+                            <option value="last-action">Last Action</option>
+                            <option value="money-mugged">Money Mugged</option>
+                            <option value="success-rate">Success Rate</option>
+                        </select>
+                        <input type="checkbox" id="toggle-alerts">
+                        <label for="toggle-alerts">Enable Sound Alerts</label>
+                    </div>
+                </div>
+                
+                <div class="targets-container">
+                    <div class="targets-header">
+                        <div class="col-name">Name [ID]</div>
+                        <div class="col-level">Level</div>
+                        <div class="col-status">Status</div>
+                        <div class="col-faction">Faction</div>
+                        <div class="col-last-action">Last Action</div>
+                        <div class="col-stats">Attack Stats</div>
+                        <div class="col-actions">Actions</div>
+                    </div>
+                    <div id="targets-list">
+                        <!-- Target rows will be inserted here dynamically -->
+                    </div>
+                    <div id="no-targets-message" class="no-targets-message">
+                        <p>No targets in your list yet. Add targets by ID or import from your attack history in Settings.</p>
+                    </div>
+                </div>
+                
+                <div class="chain-tracker">
+                    <h2>Chain Status</h2>
+                    <div class="chain-info">
+                        <span>Current Chain: <span id="current-chain">0</span></span>
+                        <span>Chain Cooldown: <span id="chain-cooldown">00:00:00</span></span>
+                    </div>
+                    <button id="update-chain">Update Chain Status</button>
+                </div>
+            </div>
+            
+            <!-- Settings Tab Content -->
+            <div class="tab-content" id="settings-tab">
+                <div class="settings-panel">
+                    <div class="settings-section">
+                        <h3>API Configuration</h3>
+                        <div class="api-section">
+                            <input type="password" id="api-key" placeholder="Enter your Torn API key">
+                            <button id="save-api-key">Save API Key</button>
+                        </div>
+                        <p class="help-text">Your API key is stored locally on your device and never shared.</p>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3>Import Targets</h3>
+                        <div class="import-section">
+                            <button id="import-attacks">Import from Attack History</button>
+                            <span id="import-status"></span>
+                        </div>
+                        <p class="help-text">Import targets from your attack history (only successful attacks).</p>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3>Data Management</h3>
+                        <button id="export-data">Export Data</button>
+                        <button id="import-data">Import Data</button>
+                        <button id="clear-data" class="danger-btn">Clear All Data</button>
+                        <p class="help-text">Export or import your target data for backup or sharing.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>Torn Target Tracker - For local use only - Not affiliated with Torn</p>
+        </footer>
+    </div>
+
+    <!-- Template for target row -->
+    <template id="target-template">
+        <div class="target-row">
+            <div class="col-name">
+                <span class="name"></span> [<span class="id"></span>]
+                <div class="sub-info">
+                    <span class="age"></span> days old • <span class="awards"></span> awards
+                </div>
+            </div>
+            <div class="col-level">
+                <span class="level"></span>
+            </div>
+            <div class="col-status">
+                <span class="status"></span>
+            </div>
+            <div class="col-faction">
+                <span class="faction-name"></span>
+            </div>
+            <div class="col-last-action">
+                <span class="last-action"></span>
+            </div>
+            <div class="col-stats">
+                <div class="attack-stats">
+                    <div>Attacks: <span class="attacks"></span></div>
+                    <div>Success: <span class="success-rate"></span></div>
+                    <div>Mugged: $<span class="money-mugged"></span></div>
+                </div>
+            </div>
+            <div class="col-actions">
+                <button class="btn-attack">Attack</button>
+                <button class="btn-profile">Profile</button>
+                <button class="btn-favorite">Favorite</button>
+                <button class="btn-remove">Remove</button>
+            </div>
+        </div>
+    </template>
+
+    <!-- Sound effects -->
+    <audio id="sound-target-online" src="sounds/target-online.wav"></audio>
+    <audio id="sound-chain-warning" src="sounds/chain-warning.wav"></audio>
+    <audio id="sound-opportunity" src="sounds/opportunity.wav"></audio>
+
+    <script src="script.js"></script>
+</body>
+</html>

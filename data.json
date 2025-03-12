@@ -1,0 +1,155 @@
+{
+  "version": "1.0.0",
+  "statusTypes": [
+    {
+      "id": "online",
+      "label": "Online",
+      "color": "#10b981",
+      "priority": 1,
+      "alert": true
+    },
+    {
+      "id": "idle",
+      "label": "Idle",
+      "color": "#3b82f6",
+      "priority": 2,
+      "alert": false
+    },
+    {
+      "id": "offline",
+      "label": "Offline",
+      "color": "#94a3b8",
+      "priority": 6,
+      "alert": false
+    },
+    {
+      "id": "hospital",
+      "label": "Hospital",
+      "color": "#f97316",
+      "priority": 3,
+      "alert": true
+    },
+    {
+      "id": "jail",
+      "label": "Jail",
+      "color": "#a16207",
+      "priority": 4,
+      "alert": false
+    },
+    {
+      "id": "traveling",
+      "label": "Traveling",
+      "color": "#8b5cf6",
+      "priority": 5,
+      "alert": false
+    }
+  ],
+  "apiSelections": {
+    "user": [
+      {
+        "name": "basic",
+        "description": "Basic user information (name, player_id, level)"
+      },
+      {
+        "name": "profile",
+        "description": "Profile information (avatar, last_action, status)"
+      },
+      {
+        "name": "personalstats",
+        "description": "Personal stats (useful for historical attack data)"
+      },
+      {
+        "name": "crimes",
+        "description": "Crimes information"
+      },
+      {
+        "name": "education",
+        "description": "Education progress and completion"
+      },
+      {
+        "name": "battlestats",
+        "description": "Battle statistics (strength, speed, defense, dexterity)"
+      },
+      {
+        "name": "bars",
+        "description": "Player bars (energy, nerve, happy, life)"
+      },
+      {
+        "name": "cooldowns",
+        "description": "Current cooldowns"
+      },
+      {
+        "name": "travel",
+        "description": "Travel information"
+      }
+    ],
+    "faction": [
+      {
+        "name": "basic",
+        "description": "Basic faction information"
+      },
+      {
+        "name": "chain",
+        "description": "Chain information"
+      },
+      {
+        "name": "attacks",
+        "description": "Recent faction attacks"
+      }
+    ]
+  },
+  "sampleTargets": [
+    {
+      "id": "12345",
+      "name": "SamplePlayer1",
+      "level": 25,
+      "avatar": "",
+      "faction": {
+        "id": "1000",
+        "name": "Sample Faction"
+      },
+      "status": {
+        "state": "Online",
+        "lastAction": "1 minute ago",
+        "lastActionTimestamp": 1647684321
+      },
+      "age": 1500,
+      "awards": 15,
+      "stats": {
+        "attacks": 12,
+        "wins": 10,
+        "moneyMugged": 1250000,
+        "lastUpdated": 1647684000000
+      }
+    },
+    {
+      "id": "67890",
+      "name": "SamplePlayer2",
+      "level": 35,
+      "avatar": "",
+      "faction": {
+        "id": "2000",
+        "name": "Another Faction"
+      },
+      "status": {
+        "state": "Hospital",
+        "lastAction": "5 hours ago",
+        "lastActionTimestamp": 1647666321
+      },
+      "age": 2500,
+      "awards": 32,
+      "stats": {
+        "attacks": 8,
+        "wins": 5,
+        "moneyMugged": 750000,
+        "lastUpdated": 1647684000000
+      }
+    }
+  ],
+  "settings": {
+    "defaultUpdateInterval": 60000,
+    "defaultChainWarningTime": 300000,
+    "tornApiEndpoint": "https://api.torn.com",
+    "tornProfileUrl": "https://www.torn.com/profiles.php?XID="
+  }
+}
