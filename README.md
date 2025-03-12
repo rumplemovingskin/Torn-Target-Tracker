@@ -2,6 +2,10 @@
 
 A local web application for tracking and managing targets in Torn.
 
+![Tracker](images/image1.png)
+
+![Settings](images/image2.png)
+
 ## Features
 
 - **Target Management**
