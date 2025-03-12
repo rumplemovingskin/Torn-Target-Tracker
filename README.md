@@ -33,7 +33,7 @@ A local web application for tracking and managing targets in Torn.
 ## Setup Instructions
 
 1. **Download the Files**
-   - Click the green <Code> button and select "Download ZIP"
+   - Click the green  button and select "Download ZIP"
    - Unzip the download and open the folder.
 
 2. **Run the Application**
@@ -93,5 +93,4 @@ The application requires these API permissions:
 ## Credits
 
 - Developed by BeauMcSwain
-
 
