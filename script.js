@@ -145,11 +145,6 @@ function init() {
     if (energyBarEl) energyBarEl.style.width = '0%';
     if (nerveBarEl) nerveBarEl.style.width = '0%';
     
-    // Import sample targets from data.json if no targets exist
-    if (targets.length === 0) {
-        loadSampleTargets();
-    }
-    
     // Render initial targets
     renderTargets();
     
@@ -213,27 +208,21 @@ function startRateDisplayTimer() {
     }, 5000); // Update every 5 seconds
 }
 
-// API Functions
 async function fetchFromTornApi(endpoint, selections = '') {
+    if (!apiKey) {
+        console.error("API key is missing!");
+        return null;
+    }
+
+    if (!endpoint || typeof endpoint !== 'string') {
+        console.error("Invalid endpoint:", endpoint);
+        return null;
+    }
+
+    const url = `${TORN_API_URL}/${endpoint}?selections=${selections}&key=${apiKey}`;
+    console.log(`Fetching from API: ${url}`); // Log the full request URL
+
     try {
-        // Track this request and get current count
-        const currentCount = trackApiRequest();
-        
-        // If we're approaching the limit, add a delay
-        if (currentCount > API_RATE_LIMIT * 0.8) {
-            // Calculate appropriate delay - longer delay as we get closer to limit
-            const delayFactor = currentCount / API_RATE_LIMIT;
-            const delayTime = Math.floor(delayFactor * 2000); // Up to 2 seconds delay
-            
-            // Add the delay
-            await new Promise(resolve => setTimeout(resolve, delayTime));
-            console.log(`Rate limiting: Added ${delayTime}ms delay (${currentCount}/${API_RATE_LIMIT})`);
-        }
-        
-        const url = `${TORN_API_URL}/${endpoint}?selections=${selections}&key=${apiKey}`;
-        console.log(`Fetching from API: ${endpoint} with selections: ${selections}`); // Debug
-        
-        // Use mode: 'cors' explicitly to help with CORS issues
         const response = await fetch(url, {
             method: 'GET',
             mode: 'cors',
@@ -242,36 +231,25 @@ async function fetchFromTornApi(endpoint, selections = '') {
                 'Accept': 'application/json'
             }
         });
-        
+
         if (!response.ok) {
             throw new Error(`HTTP error! Status: ${response.status}`);
         }
-        
+
         const data = await response.json();
-        
+
         if (data.error) {
-            console.log('API Error details:', data.error); // Debug
-            
-            // If we hit rate limit, update our tracking
-            if (data.error.code === 13) {
-                // Fill the request log to indicate we're at limit
-                apiRequestLog = Array(API_RATE_LIMIT).fill(Date.now());
-                updateRateDisplay();
-            }
-            
+            console.log('API Error details:', data.error); // Log actual error response
             throw new Error(data.error.error);
         }
-        
+
         return data;
     } catch (error) {
-        console.error('API Error:', error);
-        if (apiStatus) {
-            apiStatus.textContent = `Error: ${error.message}`;
-            apiStatus.style.color = 'var(--danger-color)';
-        }
+        console.error('API Fetch Error:', error);
         return null;
     }
 }
+
 
 async function validateApiKey() {
     const userData = await fetchFromTornApi('user', 'basic');
@@ -286,20 +264,38 @@ async function validateApiKey() {
 }
 
 async function fetchPlayerData(playerId) {
+    if (!playerId || isNaN(playerId)) {
+        console.error("Invalid Player ID:", playerId);
+        return null;
+    }
     return await fetchFromTornApi(`user/${playerId}`, 'profile,personalstats,basic');
 }
 
 async function updateChainStatus() {
-    const factionData = await fetchFromTornApi('faction', 'chain');
-    
-    if (factionData && factionData.chain && currentChainEl) {
-        chainData.current = factionData.chain.current;
-        chainData.timeout = factionData.chain.timeout;
-        
-        currentChainEl.textContent = chainData.current;
-        updateChainCooldownTimer();
+    console.log("Checking faction chain status...");
+
+    // First, check if user is in a faction before making the request
+    const userData = await fetchFromTornApi('user', 'basic');
+
+    if (!userData || !userData.faction || userData.faction.faction_id === 0) {
+        console.warn("User is not in a faction, skipping chain update.");
+        return;
     }
+
+    const factionData = await fetchFromTornApi('faction', 'chain');
+
+    if (!factionData || !factionData.chain) {
+        console.error("Failed to retrieve faction chain data.");
+        return;
+    }
+
+    chainData.current = factionData.chain.current;
+    chainData.timeout = factionData.chain.timeout;
+
+    currentChainEl.textContent = chainData.current;
+    updateChainCooldownTimer();
 }
+
 
 async function updatePlayerStatus() {
     if (!apiKey) return;
@@ -459,7 +455,7 @@ function updateTarget(targetId, newData) {
         favorite: favorite // Keep favorite status
     };
     
-    // Handle alerts for state changes - but only if they make sense for chain hunting
+    // Handle alerts for state changes 
     if (settings.alerts && oldState !== newState) {
         // If a hospitalized target leaves hospital
         if (oldState === 'Hospital' && newState !== 'Hospital') {
@@ -837,7 +833,7 @@ async function updateAllTargets() {
     if (apiStatus) apiStatus.textContent = 'Updating...';
     
     // Calculate a safe batch size based on API usage
-    // We want to leave room for other API calls (player status, chain)
+    // Leave room for other API calls (player status, chain)
     const safeRequestsPerMinute = API_RATE_LIMIT - 5; // Leave 5 requests for other calls
     const currentRequests = currentUpdateRate;
     const availableRequests = Math.max(0, safeRequestsPerMinute - currentRequests);
@@ -923,57 +919,73 @@ async function importFromAttackHistory() {
         alert('Please enter your API key first.');
         return;
     }
-    
+
     if (importStatusEl) importStatusEl.textContent = 'Importing targets...';
-    
+
     try {
-        // Get attack history from API
+        // Get the player's own ID to filter out their own attacks
+        const userData = await fetchFromTornApi('user', 'basic');
+        const myId = userData ? userData.player_id : null;
+        if (!myId) {
+            throw new Error('Failed to retrieve your player ID.');
+        }
+
+        // Fetch attack history
         const attacksData = await fetchFromTornApi('user', 'attacks');
-        
+
         if (!attacksData || !attacksData.attacks) {
             throw new Error('Failed to retrieve attack history.');
         }
-        
-        console.log('Attacks data:', attacksData); // Debug: log the entire attacks data
-        
-        // Process attacks where you did damage (mugged, hospitalized, etc.)
+
+        console.log('Attacks data:', attacksData); // Debugging
+
+        // 🔎 Filter out successful attacks **where you were the attacker**
         const successfulAttacks = Object.entries(attacksData.attacks)
-            .filter(([_, attack]) => {
-                console.log('Attack result:', attack.result); // Debug: log each attack result
-                const result = String(attack.result || '').toLowerCase();
-                return result.includes('mugged') || 
-                       result.includes('hospitalized') || 
-                       result.includes('arrested') ||
-                       (result.includes('attacked') && attack.respect_gain > 0);
-            })
-            .map(([_, attack]) => attack.defender_id);
-        
-        console.log('Successful attacks:', successfulAttacks); // Debug: log the filtered attacks
-        
-        // Remove duplicates
-        const uniqueTargetIds = [...new Set(successfulAttacks)];
-        
-        if (uniqueTargetIds.length === 0) {
-            if (importStatusEl) importStatusEl.textContent = 'No successful attacks found.';
+    		.filter(([_, attack]) => {
+        		console.log(`🔎 Attack result: ${attack.result} | Attacker: ${attack.attacker_id} | Defender: ${attack.defender_id}`);
+		
+        		// Ensure YOU were the attacker
+        		if (attack.attacker_id !== myId) {
+            			return false; // Skip if you were NOT the attacker
+        		}
+	
+        		// Convert result to lowercase to avoid case mismatches
+        		const result = String(attack.result || '').trim().toLowerCase();
+		
+        		// Include all attack outcomes where you successfully won
+        		return result.includes('mugged') || 
+               			result.includes('hospitalized') || 
+               			result.includes('arrested') ||
+               			result.includes('attacked') ||  
+               			result.includes('leave') ||     
+               			attack.respect_gain > 0;        
+    		})
+    		.map(([_, attack]) => attack.defender_id) // Extract defender ID (the enemy)
+    		.filter(id => id !== myId); // ❌ Exclude yourself just in case
+
+	console.log('Successful attack targets:', successfulAttacks);
+
+        // Check if it’s empty
+        if (successfulAttacks.length === 0) {
+            if (importStatusEl) importStatusEl.textContent = 'No valid targets found.';
             return;
         }
-        
-        // Track import progress
+
+        // Remove duplicates
+        const uniqueTargetIds = [...new Set(successfulAttacks)];
+
+        // Add targets to the list
         let importedCount = 0;
-        let errorCount = 0;
-        
-        // Import each target individually so the UI updates as they are added
         for (const targetId of uniqueTargetIds) {
-            // Skip if target already exists
             if (targets.some(target => target.id === targetId.toString())) {
+                console.log(`Skipping existing target: ${targetId}`);
                 continue;
             }
-            
+
             try {
-                if (importStatusEl) importStatusEl.textContent = `Importing target ${targetId}...`;
-                
+                console.log(`Fetching data for target ${targetId}...`);
                 const playerData = await fetchPlayerData(targetId.toString());
-                
+
                 if (playerData) {
                     const newTarget = {
                         id: targetId.toString(),
@@ -998,44 +1010,30 @@ async function importFromAttackHistory() {
                             lastUpdated: Date.now()
                         }
                     };
-                    
+
                     targets.push(newTarget);
                     saveTargets();
-                    renderTargets(); // Render after each target is added
+                    renderTargets(); // Update UI
                     importedCount++;
                 }
-                
-                // Update status as we go
-                if (importStatusEl) importStatusEl.textContent = `Imported ${importedCount} targets so far...`;
-                
-                // Dynamic delay based on our current rate
-                const baseDelay = 300; // Base delay in ms
-                const rateFactor = Math.max(0.2, Math.min(5, currentUpdateRate / (API_RATE_LIMIT * 0.7)));
-                const delay = Math.floor(baseDelay * rateFactor);
-                
-                // Small delay to avoid hitting API rate limits
-                await new Promise(resolve => setTimeout(resolve, delay));
             } catch (error) {
-                console.error(`Error importing target ${targetId}:`, error);
-                errorCount++;
+                console.error(`❌ Error importing target ${targetId}:`, error);
             }
         }
-        
+
         let statusMsg = `Successfully imported ${importedCount} new targets.`;
-        if (errorCount > 0) {
-            statusMsg += ` (${errorCount} errors)`;
-        }
         if (importStatusEl) importStatusEl.textContent = statusMsg;
-        
+
         setTimeout(() => {
             if (importStatusEl) importStatusEl.textContent = '';
         }, 5000);
-        
+
     } catch (error) {
         console.error('Import error:', error);
         if (importStatusEl) importStatusEl.textContent = `Error: ${error.message}`;
     }
 }
+
 
 // Export all data to JSON file
 function exportData() {
@@ -1104,65 +1102,6 @@ function clearAllData() {
         saveTargets();
         renderTargets();
         alert('All target data has been cleared.');
-    }
-}
-
-// Load sample targets from data.json
-function loadSampleTargets() {
-    // Hard-coded sample targets to avoid CORS issues when running locally
-    const sampleTargets = [
-        {
-            "id": "12345",
-            "name": "SamplePlayer1",
-            "level": 25,
-            "favorite": false,
-            "faction": {
-                "id": "1000",
-                "name": "Sample Faction"
-            },
-            "status": {
-                "state": "Online",
-                "lastAction": "1 minute ago",
-                "lastActionTimestamp": 1647684321
-            },
-            "age": 1500,
-            "awards": 15,
-            "stats": {
-                "attacks": 12,
-                "wins": 10,
-                "moneyMugged": 1250000,
-                "lastUpdated": 1647684000000
-            }
-        },
-        {
-            "id": "67890",
-            "name": "SamplePlayer2",
-            "level": 35,
-            "favorite": false,
-            "faction": {
-                "id": "2000",
-                "name": "Another Faction"
-            },
-            "status": {
-                "state": "Hospital",
-                "lastAction": "5 hours ago",
-                "lastActionTimestamp": 1647666321
-            },
-            "age": 2500,
-            "awards": 32,
-            "stats": {
-                "attacks": 8,
-                "wins": 5,
-                "moneyMugged": 750000,
-                "lastUpdated": 1647684000000
-            }
-        }
-    ];
-    
-    // Only set sample targets if we have none
-    if (targets.length === 0) {
-        targets = [...sampleTargets];
-        saveTargets();
     }
 }
 
