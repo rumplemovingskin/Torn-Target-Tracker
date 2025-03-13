@@ -7,17 +7,21 @@ const TORN_PROFILE_URL = 'https://www.torn.com/profiles.php?XID=';
 const STORAGE_KEY_API = 'torn_tracker_api_key';
 const STORAGE_KEY_TARGETS = 'torn_tracker_targets';
 const STORAGE_KEY_SETTINGS = 'torn_tracker_settings';
-const UPDATE_INTERVAL = 60000; // Update targets every 60 seconds
-const CHAIN_WARNING_TIME = 300000; // 5 minutes chain warning
+const STORAGE_KEY_NOTIFICATIONS = 'torn_tracker_notifications';
+const UPDATE_INTERVAL_TARGETS = 30000; // Check targets every 30 seconds (changed from 15)
+const UPDATE_INTERVAL_USER = 15000; // Update user status every 30 seconds (changed from 15)
+const CHAIN_WARNING_TIME = 60000; // 1 minute chain warning
 const API_RATE_LIMIT = 100; // Maximum 100 requests per minute
 const API_WINDOW_SIZE = 60000; // 1 minute in milliseconds
+const MAX_NOTIFICATIONS = 50; // Maximum number of notifications to store
 
 // DOM Elements - globally define to make sure they're initialized properly
 let apiKeyInput, saveApiKeyBtn, apiStatus, apiRateDisplay, targetIdInput, addTargetBtn, targetsList, 
     noTargetsMessage, filterStatus, filterSort, toggleAlerts, currentChainEl, 
     chainCooldownEl, updateChainBtn, targetTemplate, tabButtons, tabContents, 
     importAttacksBtn, importStatusEl, exportDataBtn, importDataBtn, clearDataBtn,
-    energyBarEl, energyTextEl, nerveBarEl, nerveTextEl, drugCooldownEl, boosterCooldownEl;
+    energyBarEl, energyTextEl, nerveBarEl, nerveTextEl, drugCooldownEl, boosterCooldownEl,
+    notificationsList, clearNotificationsBtn;
 
 // Sound Elements
 let soundTargetOnline, soundChainWarning, soundOpportunity;
@@ -26,12 +30,16 @@ let soundTargetOnline, soundChainWarning, soundOpportunity;
 let apiKey = localStorage.getItem(STORAGE_KEY_API) || '';
 let targets = JSON.parse(localStorage.getItem(STORAGE_KEY_TARGETS) || '[]');
 let settings = JSON.parse(localStorage.getItem(STORAGE_KEY_SETTINGS) || '{"alerts": false, "lastUpdate": 0}');
+let notifications = JSON.parse(localStorage.getItem(STORAGE_KEY_NOTIFICATIONS) || '[]');
 let updateTimer = null;
+let userUpdateTimer = null;
 let chainTimer = null;
 let cooldownTimer = null;
 let rateLimitTimer = null;
 let apiRequestLog = []; // Tracks timestamps of API requests
 let currentUpdateRate = 0; // Current update rate to display
+let targetUpdateQueue = []; // Queue for target updates
+let isUpdating = false; // Flag to prevent multiple concurrent updates
 let chainData = {
     current: 0,
     timeout: 0
@@ -69,6 +77,8 @@ function initDOMReferences() {
     exportDataBtn = document.getElementById('export-data');
     importDataBtn = document.getElementById('import-data');
     clearDataBtn = document.getElementById('clear-data');
+    notificationsList = document.getElementById('notifications-list');
+    clearNotificationsBtn = document.getElementById('clear-notifications');
 
     // Player Status Elements
     energyBarEl = document.getElementById('energy-bar');
@@ -101,13 +111,16 @@ function init() {
     if (saveApiKeyBtn) saveApiKeyBtn.addEventListener('click', handleSaveApiKey);
     if (addTargetBtn) addTargetBtn.addEventListener('click', handleAddTarget);
     if (filterStatus) filterStatus.addEventListener('change', renderTargets);
-    if (filterSort) filterStatus.addEventListener('change', renderTargets);
+    if (filterSort) filterSort.addEventListener('change', renderTargets);
     if (toggleAlerts) toggleAlerts.addEventListener('change', handleToggleAlerts);
     if (updateChainBtn) {
         updateChainBtn.addEventListener('click', () => {
             updateChainStatus();
             updatePlayerStatus();
         });
+    }
+    if (clearNotificationsBtn) {
+        clearNotificationsBtn.addEventListener('click', clearNotifications);
     }
     
     // Tab navigation
@@ -148,12 +161,15 @@ function init() {
     // Render initial targets
     renderTargets();
     
+    // Render notifications
+    renderNotifications();
+    
     // Start rate display timer
     startRateDisplayTimer();
     
-    // Start update timer if we have an API key
+    // Start update timers if we have an API key
     if (apiKey) {
-        startUpdateTimer();
+        startUpdateTimers();
     }
 }
 
@@ -219,8 +235,11 @@ async function fetchFromTornApi(endpoint, selections = '') {
         return null;
     }
 
+    // Track this API request for rate limiting
+    trackApiRequest();
+
     const url = `${TORN_API_URL}/${endpoint}?selections=${selections}&key=${apiKey}`;
-    console.log(`Fetching from API: ${url}`); // Log the full request URL
+    console.log(`Fetching from API: ${endpoint} (selections: ${selections})`);
 
     try {
         const response = await fetch(url, {
@@ -239,17 +258,38 @@ async function fetchFromTornApi(endpoint, selections = '') {
         const data = await response.json();
 
         if (data.error) {
-            console.log('API Error details:', data.error); // Log actual error response
+            console.log('API Error details:', data.error);
             throw new Error(data.error.error);
         }
 
         return data;
     } catch (error) {
         console.error('API Fetch Error:', error);
+        if (apiStatus) {
+            apiStatus.textContent = `Error: ${error.message}`;
+            apiStatus.style.color = 'var(--danger-color)';
+        }
         return null;
     }
 }
 
+async function checkChainInUserData() {
+    try {
+        // First try to get chain data directly from the user endpoint
+        const userData = await fetchFromTornApi('user', 'bars');
+        
+        if (userData && userData.chain) {
+            console.log("Chain data found directly in user data:", userData.chain);
+            return userData.chain;
+        } else {
+            console.log("No chain data in user bars response");
+            return null;
+        }
+    } catch (error) {
+        console.error("Error checking for chain in user data:", error);
+        return null;
+    }
+}
 
 async function validateApiKey() {
     const userData = await fetchFromTornApi('user', 'basic');
@@ -274,29 +314,70 @@ async function fetchPlayerData(playerId) {
 async function updateChainStatus() {
     console.log("Checking faction chain status...");
 
-    // First, check if user is in a faction before making the request
-    const userData = await fetchFromTornApi('user', 'basic');
+    try {
+        // First, try to get chain data directly from the user endpoint
+        const chainFromUser = await checkChainInUserData();
+        
+        if (chainFromUser) {
+            // Update chain data from user endpoint
+            chainData.current = chainFromUser.current;
+            chainData.timeout = chainFromUser.timeout;
+            
+            if (currentChainEl) currentChainEl.textContent = chainData.current;
+            updateChainCooldownTimer();
+            return;
+        }
+        
+        // If we can't get chain data directly, try to get faction ID
+        const userData = await fetchFromTornApi('user', 'profile');
+        console.log("User profile data for faction check:", userData);
+        
+        if (!userData) {
+            console.warn("Failed to retrieve user data");
+            return;
+        }
+        
+        // Check for faction info in different possible locations
+        let factionId = null;
+        
+        if (userData.faction && userData.faction.faction_id) {
+            factionId = userData.faction.faction_id;
+        } else if (userData.faction_id) {
+            factionId = userData.faction_id;
+        } else {
+            console.warn("No faction information found in user data");
+            return;
+        }
+        
+        if (!factionId || factionId === 0) {
+            console.warn("User is not in a faction, skipping chain update.");
+            return;
+        }
+        
+        console.log(`Fetching faction data for faction ID: ${factionId}`);
+        
+        // Now that we have the faction ID, fetch the chain data
+        const factionData = await fetchFromTornApi(`faction/${factionId}`, 'chain');
 
-    if (!userData || !userData.faction || userData.faction.faction_id === 0) {
-        console.warn("User is not in a faction, skipping chain update.");
-        return;
+        if (!factionData || !factionData.chain) {
+            console.error("Failed to retrieve faction chain data.");
+            return;
+        }
+
+        console.log("Chain data received:", factionData.chain);
+        
+        // Update chain data
+        chainData.current = factionData.chain.current;
+        chainData.timeout = factionData.chain.timeout;
+
+        if (currentChainEl) currentChainEl.textContent = chainData.current;
+        updateChainCooldownTimer();
+    } catch (error) {
+        console.error("Error updating chain status:", error);
     }
-
-    const factionData = await fetchFromTornApi('faction', 'chain');
-
-    if (!factionData || !factionData.chain) {
-        console.error("Failed to retrieve faction chain data.");
-        return;
-    }
-
-    chainData.current = factionData.chain.current;
-    chainData.timeout = factionData.chain.timeout;
-
-    currentChainEl.textContent = chainData.current;
-    updateChainCooldownTimer();
 }
 
-
+// Update the player status function to also update chain data if available
 async function updatePlayerStatus() {
     if (!apiKey) return;
     
@@ -308,11 +389,11 @@ async function updatePlayerStatus() {
             return;
         }
         
-        // Get player data from API (bars and cooldowns)
+        // Get bars and cooldowns data
         const userData = await fetchFromTornApi('user', 'bars,cooldowns');
         
         if (userData) {
-            console.log('Player data (bars):', userData); // Debug
+            console.log('Player data received:', userData);
             
             // Update energy
             if (userData.energy) {
@@ -322,8 +403,6 @@ async function updatePlayerStatus() {
                 const energyPercent = (userData.energy.current / userData.energy.maximum) * 100;
                 energyBarEl.style.width = `${energyPercent}%`;
                 energyTextEl.textContent = `${userData.energy.current}/${userData.energy.maximum}`;
-            } else {
-                console.warn('No energy data returned from API');
             }
             
             // Update nerve
@@ -334,19 +413,63 @@ async function updatePlayerStatus() {
                 const nervePercent = (userData.nerve.current / userData.nerve.maximum) * 100;
                 nerveBarEl.style.width = `${nervePercent}%`;
                 nerveTextEl.textContent = `${userData.nerve.current}/${userData.nerve.maximum}`;
-            } else {
-                console.warn('No nerve data returned from API');
             }
             
-            // Update cooldowns
+            // If chain data is available directly in user data, update it
+            if (userData.chain) {
+                console.log('Chain data from player status:', userData.chain);
+                
+                // For chain data, we need to ensure the timeout is an actual timestamp, not a relative time
+                if (userData.chain.timeout && userData.server_time) {
+                    // If timeout is small (like 49), it's probably seconds remaining, not a timestamp
+                    if (userData.chain.timeout < 1000) {
+                        // Convert to absolute timestamp by adding to server time
+                        chainData.timeout = userData.server_time + userData.chain.timeout;
+                        console.log(`Converted chain timeout from relative (${userData.chain.timeout}s) to absolute: ${chainData.timeout}`);
+                    } else {
+                        chainData.timeout = userData.chain.timeout;
+                    }
+                } else {
+                    chainData.timeout = 0;
+                }
+                
+                chainData.current = userData.chain.current;
+                
+                if (currentChainEl) currentChainEl.textContent = chainData.current;
+                updateChainCooldownTimer();
+            }
+            
+            // Update cooldowns - we need to handle the possibility that these are relative times
             if (userData.cooldowns) {
-                playerStatus.cooldowns.drug = userData.cooldowns.drug || 0;
-                playerStatus.cooldowns.booster = userData.cooldowns.booster || 0;
+                console.log('Cooldown data:', userData.cooldowns);
+                
+                // Store timestamps as integers
+                // Check if these are absolute timestamps or relative times
+                if (userData.server_time) {
+                    // If the cooldown times are small, they're probably seconds remaining, not timestamps
+                    if (userData.cooldowns.drug > 0 && userData.cooldowns.drug < 86400) {
+                        // Convert to absolute timestamp
+                        playerStatus.cooldowns.drug = userData.server_time + parseInt(userData.cooldowns.drug);
+                        console.log(`Converted drug cooldown from relative (${userData.cooldowns.drug}s) to absolute: ${playerStatus.cooldowns.drug}`);
+                    } else {
+                        playerStatus.cooldowns.drug = parseInt(userData.cooldowns.drug || 0);
+                    }
+                    
+                    if (userData.cooldowns.booster > 0 && userData.cooldowns.booster < 86400) {
+                        // Convert to absolute timestamp
+                        playerStatus.cooldowns.booster = userData.server_time + parseInt(userData.cooldowns.booster);
+                        console.log(`Converted booster cooldown from relative (${userData.cooldowns.booster}s) to absolute: ${playerStatus.cooldowns.booster}`);
+                    } else {
+                        playerStatus.cooldowns.booster = parseInt(userData.cooldowns.booster || 0);
+                    }
+                } else {
+                    // No server time, just use as-is
+                    playerStatus.cooldowns.drug = parseInt(userData.cooldowns.drug || 0);
+                    playerStatus.cooldowns.booster = parseInt(userData.cooldowns.booster || 0);
+                }
                 
                 // Start cooldown timers
                 updateCooldownTimers();
-            } else {
-                console.warn('No cooldown data returned from API');
             }
             
             if (apiStatus) {
@@ -363,6 +486,7 @@ async function updatePlayerStatus() {
     }
 }
 
+
 function updateCooldownTimers() {
     if (cooldownTimer) clearInterval(cooldownTimer);
     
@@ -373,12 +497,28 @@ function updateCooldownTimers() {
         const drugTimeRemaining = Math.max(0, playerStatus.cooldowns.drug - now);
         if (drugCooldownEl) {
             drugCooldownEl.textContent = formatTimeRemaining(drugTimeRemaining);
+            // Add color indication for active cooldowns
+            drugCooldownEl.style.color = drugTimeRemaining > 0 ? 'var(--warning-color)' : 'var(--text-secondary)';
         }
         
         // Update booster cooldown
         const boosterTimeRemaining = Math.max(0, playerStatus.cooldowns.booster - now);
         if (boosterCooldownEl) {
             boosterCooldownEl.textContent = formatTimeRemaining(boosterTimeRemaining);
+            // Add color indication for active cooldowns
+            boosterCooldownEl.style.color = boosterTimeRemaining > 0 ? 'var(--warning-color)' : 'var(--text-secondary)';
+        }
+        
+        // Only log once every 60 seconds to reduce console spam
+        if (now % 60 === 0) {
+            console.log('Cooldown timer update:', {
+                currentTime: now,
+                drugTimestamp: playerStatus.cooldowns.drug,
+                drugRemaining: drugTimeRemaining,
+                boosterTimestamp: playerStatus.cooldowns.booster,
+                boosterRemaining: boosterTimeRemaining,
+                formattedDrugTime: formatTimeRemaining(drugTimeRemaining)
+            });
         }
     }
     
@@ -403,8 +543,6 @@ async function addTarget(playerId) {
         alert(`Couldn't retrieve data for player ${playerId}.`);
         return;
     }
-    
-    console.log('Player data:', playerData); // Debug
     
     // Safely extract nested properties with fallbacks
     const newTarget = {
@@ -434,6 +572,79 @@ async function addTarget(playerId) {
     targets.push(newTarget);
     saveTargets();
     renderTargets();
+    
+    // Immediately fetch attack stats for this target
+    updateTargetAttackStats(playerId);
+}
+
+async function updateTargetAttackStats(targetId) {
+    // Fetch attack history to update the target's attack stats
+    try {
+        const attacksData = await fetchFromTornApi('user', 'attacks');
+        
+        if (!attacksData || !attacksData.attacks) {
+            console.warn("No attack data available");
+            return;
+        }
+        
+        const targetIndex = targets.findIndex(target => target.id === targetId);
+        if (targetIndex === -1) return;
+        
+        // Get user's own ID to filter attacks properly
+        const userData = await fetchFromTornApi('user', 'basic');
+        const myId = userData ? userData.player_id.toString() : null;
+        
+        if (!myId) {
+            console.error("Failed to get user's ID");
+            return;
+        }
+        
+        // Filter attacks against this target
+        const targetAttacks = Object.values(attacksData.attacks).filter(attack => {
+            return attack.defender_id.toString() === targetId && attack.attacker_id.toString() === myId;
+        });
+        
+        if (targetAttacks.length === 0) {
+            console.log(`No attack history found for target ${targetId}`);
+            return;
+        }
+        
+        // Count attacks and successful attacks
+        let totalAttacks = targetAttacks.length;
+        let wins = 0;
+        let totalMugged = 0;
+        
+        targetAttacks.forEach(attack => {
+            const result = String(attack.result || '').toLowerCase();
+            // Consider any of these results as a "win"
+            if (result.includes('mugged') || 
+                result.includes('hospitalized') || 
+                result.includes('arrested') ||
+                result.includes('attacked') ||
+                result.includes('leave') ||
+                attack.respect_gain > 0) {
+                wins++;
+                
+                // Add money mugged if available
+                if (attack.money_mugged) {
+                    totalMugged += attack.money_mugged;
+                }
+            }
+        });
+        
+        // Update the target's stats
+        targets[targetIndex].stats.attacks = totalAttacks;
+        targets[targetIndex].stats.wins = wins;
+        targets[targetIndex].stats.moneyMugged = totalMugged;
+        targets[targetIndex].stats.lastUpdated = Date.now();
+        
+        saveTargets();
+        renderTargets();
+        
+        console.log(`Updated attack stats for ${targets[targetIndex].name}: ${wins}/${totalAttacks} wins, $${totalMugged} mugged`);
+    } catch (error) {
+        console.error(`Error updating attack stats for target ${targetId}:`, error);
+    }
 }
 
 function updateTarget(targetId, newData) {
@@ -445,14 +656,16 @@ function updateTarget(targetId, newData) {
     const oldState = targets[targetIndex].status.state;
     const newState = newData.status.state;
     
-    // Preserve favorite status
+    // Preserve favorite status and stats
     const favorite = targets[targetIndex].favorite;
+    const stats = targets[targetIndex].stats;
     
     // Update the target with new data but keep stats and favorite status
     targets[targetIndex] = {
         ...targets[targetIndex],
         ...newData,
-        favorite: favorite // Keep favorite status
+        favorite: favorite, // Keep favorite status
+        stats: stats // Keep attack stats
     };
     
     // Handle alerts for state changes 
@@ -460,13 +673,17 @@ function updateTarget(targetId, newData) {
         // If a hospitalized target leaves hospital
         if (oldState === 'Hospital' && newState !== 'Hospital') {
             if (soundOpportunity) soundOpportunity.play();
-            showNotification(`${targets[targetIndex].name} has left the hospital!`, 'target-opportunity');
+            const notificationText = `${targets[targetIndex].name} has left the hospital!`;
+            addNotification(notificationText, 'target-opportunity');
+            showNotification(notificationText, 'target-opportunity');
         }
         
         // If an offline target comes online
         if ((oldState === 'Offline' || oldState === 'Idle') && newState === 'Online') {
             if (soundTargetOnline) soundTargetOnline.play();
-            showNotification(`${targets[targetIndex].name} is now online!`, 'target-online');
+            const notificationText = `${targets[targetIndex].name} is now online!`;
+            addNotification(notificationText, 'target-online');
+            showNotification(notificationText, 'target-online');
         }
     }
     
@@ -513,6 +730,75 @@ function recordAttackResult(targetId, success, respect = 0, moneyMugged = 0) {
     renderTargets();
 }
 
+// Notification system
+function addNotification(message, type) {
+    const notification = {
+        id: Date.now(),
+        message,
+        type,
+        timestamp: new Date().toLocaleString()
+    };
+    
+    // Add to the beginning of the array
+    notifications.unshift(notification);
+    
+    // Limit the number of stored notifications
+    if (notifications.length > MAX_NOTIFICATIONS) {
+        notifications = notifications.slice(0, MAX_NOTIFICATIONS);
+    }
+    
+    // Save to local storage
+    localStorage.setItem(STORAGE_KEY_NOTIFICATIONS, JSON.stringify(notifications));
+    
+    // Update the UI if the notifications tab is visible
+    renderNotifications();
+}
+
+function renderNotifications() {
+    if (!notificationsList) return;
+    
+    notificationsList.innerHTML = '';
+    
+    if (notifications.length === 0) {
+        const emptyMessage = document.createElement('div');
+        emptyMessage.className = 'notification-empty';
+        emptyMessage.textContent = 'No notifications yet.';
+        notificationsList.appendChild(emptyMessage);
+        return;
+    }
+    
+    notifications.forEach(notification => {
+        const notificationEl = document.createElement('div');
+        notificationEl.className = 'notification-item';
+        
+        // Add appropriate class based on type
+        if (notification.type) {
+            notificationEl.classList.add(notification.type);
+        }
+        
+        const timeEl = document.createElement('div');
+        timeEl.className = 'notification-time';
+        timeEl.textContent = notification.timestamp;
+        
+        const messageEl = document.createElement('div');
+        messageEl.className = 'notification-message';
+        messageEl.textContent = notification.message;
+        
+        notificationEl.appendChild(timeEl);
+        notificationEl.appendChild(messageEl);
+        
+        notificationsList.appendChild(notificationEl);
+    });
+}
+
+function clearNotifications() {
+    if (confirm('Are you sure you want to clear all notifications?')) {
+        notifications = [];
+        localStorage.setItem(STORAGE_KEY_NOTIFICATIONS, JSON.stringify(notifications));
+        renderNotifications();
+    }
+}
+
 // Rendering
 function renderTargets() {
     // Make sure targetsList exists
@@ -537,6 +823,7 @@ function renderTargets() {
     
     // Apply sorting - favorites first, then selected sort
     const sortBy = filterSort ? filterSort.value : 'level-desc';
+    
     filteredTargets.sort((a, b) => {
         // First sort by favorite status
         if (a.favorite && !b.favorite) return -1;
@@ -653,6 +940,11 @@ function renderTargets() {
             if (favoriteBtn) {
                 favoriteBtn.textContent = target.favorite ? 'Unfavorite' : 'Favorite';
                 favoriteBtn.addEventListener('click', () => toggleFavorite(target.id));
+                
+                const updateStatsBtn = targetRow.querySelector('.btn-update-stats');
+                if (updateStatsBtn) {
+                    updateStatsBtn.addEventListener('click', () => updateTargetAttackStats(target.id));
+                }
             }
             
             const removeBtn = targetRow.querySelector('.btn-remove');
@@ -686,8 +978,9 @@ async function handleSaveApiKey() {
     if (isValid) {
         localStorage.setItem(STORAGE_KEY_API, apiKey);
         apiKeyInput.value = '••••••••••••••••••••••••••';
-        startUpdateTimer();
+        startUpdateTimers();
         updateChainStatus();
+        updatePlayerStatus();
     } else {
         apiKey = '';
         localStorage.removeItem(STORAGE_KEY_API);
@@ -744,9 +1037,6 @@ function formatTimeRemaining(seconds) {
 }
 
 function showNotification(message, type) {
-    // Just use console log for now, don't request browser notifications
-    console.log(`NOTIFICATION: ${type} - ${message}`);
-    
     // Create a temporary on-screen notification
     const notification = document.createElement('div');
     notification.className = 'app-notification';
@@ -773,20 +1063,34 @@ function showNotification(message, type) {
 }
 
 // Timer Functions
-function startUpdateTimer() {
+function startUpdateTimers() {
+    // Clear any existing timers
     if (updateTimer) clearInterval(updateTimer);
+    if (userUpdateTimer) clearInterval(userUpdateTimer);
     
-    // Initial update
-    updateAllTargets();
-    updatePlayerStatus();
-    updateChainStatus();
+    // Stagger initial updates to avoid API call bursts
+    setTimeout(() => {
+        // Initial update of player status and chain
+        updatePlayerStatus();
+    }, 1000);
     
-    // Set interval for future updates
+    setTimeout(() => {
+        // Initial update of targets
+        updateAllTargets();
+    }, 3000);
+    
+    // Set interval for target updates (rate-limited)
+    // Increase the interval to reduce API calls
     updateTimer = setInterval(() => {
         updateAllTargets();
+    }, 30000); // Update targets every 30 seconds instead of 15
+    
+    // Set interval for user and chain status
+    // Increase the interval to reduce API calls
+    userUpdateTimer = setInterval(() => {
         updatePlayerStatus();
-        updateChainStatus();
-    }, UPDATE_INTERVAL);
+        // No need to explicitly call updateChainStatus() since updatePlayerStatus() will update chain data
+    }, 30000); // Update user status every 30 seconds instead of 15
 }
 
 function updateChainCooldownTimer() {
@@ -801,6 +1105,16 @@ function updateChainCooldownTimer() {
         const now = Math.floor(Date.now() / 1000);
         const timeRemaining = Math.max(0, chainData.timeout - now);
         
+        // Only log once every 60 seconds to reduce console spam
+        if (now % 60 === 0) {
+            console.log('Chain timer update:', {
+                currentTime: now,
+                chainTimeout: chainData.timeout,
+                timeRemaining: timeRemaining,
+                formattedTime: formatTimeRemaining(timeRemaining)
+            });
+        }
+        
         chainCooldownEl.textContent = formatTimeRemaining(timeRemaining);
         
         // Apply warning class if chain is about to expire
@@ -810,7 +1124,9 @@ function updateChainCooldownTimer() {
             // Play sound if alerts are enabled and under 5 minutes
             if (settings.alerts && timeRemaining === Math.floor(CHAIN_WARNING_TIME / 1000)) {
                 if (soundChainWarning) soundChainWarning.play();
-                showNotification('Chain expiring soon!', 'chain-warning');
+                const notificationText = 'Chain expiring soon!';
+                addNotification(notificationText, 'chain-warning');
+                showNotification(notificationText, 'chain-warning');
             }
         } else if (timeRemaining === 0) {
             chainCooldownEl.style.color = 'var(--danger-color)';
@@ -828,77 +1144,96 @@ function updateChainCooldownTimer() {
 
 // Data management
 async function updateAllTargets() {
-    if (!apiKey) return;
+    if (!apiKey || isUpdating) return;
+    
+    isUpdating = true;
     
     if (apiStatus) apiStatus.textContent = 'Updating...';
     
-    // Calculate a safe batch size based on API usage
-    // Leave room for other API calls (player status, chain)
-    const safeRequestsPerMinute = API_RATE_LIMIT - 5; // Leave 5 requests for other calls
-    const currentRequests = currentUpdateRate;
-    const availableRequests = Math.max(0, safeRequestsPerMinute - currentRequests);
-    
-    // If we don't have enough available requests, only update a portion of targets
-    let targetsToUpdate = targets;
-    if (availableRequests < targets.length) {
-        // Determine how many targets we can safely update
-        const batchSize = Math.max(1, Math.floor(availableRequests));
-        console.log(`Rate limiting: Updating only ${batchSize}/${targets.length} targets`);
+    try {
+        // Calculate a safe batch size based on API usage
+        // Leave room for other API calls (player status, chain)
+        const safeRequestsPerMinute = API_RATE_LIMIT - 10; // Leave 10 requests for other calls
+        const currentRequests = currentUpdateRate;
+        const availableRequests = Math.max(0, safeRequestsPerMinute - currentRequests);
         
-        // Select a rotation of targets to update
-        const startIndex = (Math.floor(Date.now() / 30000)) % targets.length; // Rotate every 30 seconds
-        targetsToUpdate = [];
+        // Prioritize which targets to update
+        let prioritizedTargets = [...targets];
         
-        for (let i = 0; i < batchSize; i++) {
-            const index = (startIndex + i) % targets.length;
-            targetsToUpdate.push(targets[index]);
-        }
-    }
-    
-    for (const target of targetsToUpdate) {
-        try {
-            const playerData = await fetchPlayerData(target.id);
+        // Sort targets: hospitalized first, then by last update time
+        prioritizedTargets.sort((a, b) => {
+            // Hospitalized targets get priority
+            if (a.status.state === 'Hospital' && b.status.state !== 'Hospital') return -1;
+            if (a.status.state !== 'Hospital' && b.status.state === 'Hospital') return 1;
             
-            if (playerData) {
-                const updatedData = {
-                    name: playerData.name || target.name,
-                    level: playerData.level || target.level,
-                    faction: {
-                        id: playerData.faction ? playerData.faction.faction_id || target.faction.id : target.faction.id,
-                        name: playerData.faction ? playerData.faction.faction_name || target.faction.name : target.faction.name
-                    },
-                    status: {
-                        state: playerData.status ? playerData.status.state || target.status.state : target.status.state,
-                        lastAction: playerData.last_action ? playerData.last_action.relative || target.status.lastAction : target.status.lastAction,
-                        lastActionTimestamp: playerData.last_action ? playerData.last_action.timestamp || target.status.lastActionTimestamp : target.status.lastActionTimestamp
-                    },
-                    age: playerData.age || target.age,
-                    awards: playerData.awards || target.awards
-                };
-                
-                updateTarget(target.id, updatedData);
-            }
-        } catch (error) {
-            console.error(`Error updating target ${target.id}:`, error);
+            // Then sort by last updated time (oldest first)
+            const aLastUpdated = a.stats.lastUpdated || 0;
+            const bLastUpdated = b.stats.lastUpdated || 0;
+            return aLastUpdated - bLastUpdated;
+        });
+        
+        // If we don't have enough available requests, only update a portion of targets
+        let targetsToUpdate = prioritizedTargets;
+        if (availableRequests < prioritizedTargets.length) {
+            // Determine how many targets we can safely update
+            const batchSize = Math.max(1, Math.floor(availableRequests));
+            console.log(`Rate limiting: Updating only ${batchSize}/${prioritizedTargets.length} targets`);
+            targetsToUpdate = prioritizedTargets.slice(0, batchSize);
         }
         
-        // Dynamic delay based on our current rate
-        const baseDelay = 300; // Base delay in ms
-        const rateFactor = Math.max(0.2, Math.min(5, currentUpdateRate / (API_RATE_LIMIT * 0.7))); 
-        const delay = Math.floor(baseDelay * rateFactor);
+        for (const target of targetsToUpdate) {
+            try {
+                const playerData = await fetchPlayerData(target.id);
+                
+                if (playerData) {
+                    const updatedData = {
+                        name: playerData.name || target.name,
+                        level: playerData.level || target.level,
+                        faction: {
+                            id: playerData.faction ? playerData.faction.faction_id || target.faction.id : target.faction.id,
+                            name: playerData.faction ? playerData.faction.faction_name || target.faction.name : target.faction.name
+                        },
+                        status: {
+                            state: playerData.status ? playerData.status.state || target.status.state : target.status.state,
+                            lastAction: playerData.last_action ? playerData.last_action.relative || target.status.lastAction : target.status.lastAction,
+                            lastActionTimestamp: playerData.last_action ? playerData.last_action.timestamp || target.status.lastActionTimestamp : target.status.lastActionTimestamp
+                        },
+                        age: playerData.age || target.age,
+                        awards: playerData.awards || target.awards
+                    };
+                    
+                    updateTarget(target.id, updatedData);
+                }
+            } catch (error) {
+                console.error(`Error updating target ${target.id}:`, error);
+            }
+            
+            // Dynamic delay based on our current rate
+            const baseDelay = 200; // Base delay in ms
+            const rateFactor = Math.max(0.2, Math.min(5, currentUpdateRate / (API_RATE_LIMIT * 0.7))); 
+            const delay = Math.floor(baseDelay * rateFactor);
+            
+            // Small delay to avoid hitting API rate limits
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
         
-        // Small delay to avoid hitting API rate limits
-        await new Promise(resolve => setTimeout(resolve, delay));
-    }
-    
-    settings.lastUpdate = Date.now();
-    saveSettings();
-    renderTargets();
-    
-    const lastUpdateTime = new Date(settings.lastUpdate).toLocaleTimeString();
-    if (apiStatus) {
-        apiStatus.textContent = `Connected - Updated: ${lastUpdateTime}`;
-        apiStatus.style.color = 'var(--success-color)';
+        settings.lastUpdate = Date.now();
+        saveSettings();
+        renderTargets();
+        
+        const lastUpdateTime = new Date(settings.lastUpdate).toLocaleTimeString();
+        if (apiStatus) {
+            apiStatus.textContent = `Connected - Updated: ${lastUpdateTime}`;
+            apiStatus.style.color = 'var(--success-color)';
+        }
+    } catch (error) {
+        console.error('Error updating targets:', error);
+        if (apiStatus) {
+            apiStatus.textContent = `Error: ${error.message}`;
+            apiStatus.style.color = 'var(--danger-color)';
+        }
+    } finally {
+        isUpdating = false;
     }
 }
 
@@ -937,35 +1272,29 @@ async function importFromAttackHistory() {
             throw new Error('Failed to retrieve attack history.');
         }
 
-        console.log('Attacks data:', attacksData); // Debugging
-
-        // 🔎 Filter out successful attacks **where you were the attacker**
+        // Filter out successful attacks where you were the attacker
         const successfulAttacks = Object.entries(attacksData.attacks)
-    		.filter(([_, attack]) => {
-        		console.log(`🔎 Attack result: ${attack.result} | Attacker: ${attack.attacker_id} | Defender: ${attack.defender_id}`);
-		
-        		// Ensure YOU were the attacker
-        		if (attack.attacker_id !== myId) {
-            			return false; // Skip if you were NOT the attacker
-        		}
-	
-        		// Convert result to lowercase to avoid case mismatches
-        		const result = String(attack.result || '').trim().toLowerCase();
-		
-        		// Include all attack outcomes where you successfully won
-        		return result.includes('mugged') || 
-               			result.includes('hospitalized') || 
-               			result.includes('arrested') ||
-               			result.includes('attacked') ||  
-               			result.includes('leave') ||     
-               			attack.respect_gain > 0;        
-    		})
-    		.map(([_, attack]) => attack.defender_id) // Extract defender ID (the enemy)
-    		.filter(id => id !== myId); // ❌ Exclude yourself just in case
+            .filter(([_, attack]) => {
+                // Ensure YOU were the attacker
+                if (attack.attacker_id !== myId) {
+                    return false; // Skip if you were NOT the attacker
+                }
+        
+                // Convert result to lowercase to avoid case mismatches
+                const result = String(attack.result || '').trim().toLowerCase();
+        
+                // Include all attack outcomes where you successfully won
+                return result.includes('mugged') || 
+                       result.includes('hospitalized') || 
+                       result.includes('arrested') ||
+                       result.includes('attacked') ||  
+                       result.includes('leave') ||     
+                       attack.respect_gain > 0;        
+            })
+            .map(([_, attack]) => attack.defender_id) // Extract defender ID (the enemy)
+            .filter(id => id !== myId); // Exclude yourself just in case
 
-	console.log('Successful attack targets:', successfulAttacks);
-
-        // Check if it’s empty
+        // Check if it's empty
         if (successfulAttacks.length === 0) {
             if (importStatusEl) importStatusEl.textContent = 'No valid targets found.';
             return;
@@ -1015,10 +1344,16 @@ async function importFromAttackHistory() {
                     saveTargets();
                     renderTargets(); // Update UI
                     importedCount++;
+                    
+                    // After adding, update the attack stats
+                    await updateTargetAttackStats(targetId.toString());
                 }
             } catch (error) {
-                console.error(`❌ Error importing target ${targetId}:`, error);
+                console.error(`Error importing target ${targetId}:`, error);
             }
+            
+            // Add delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 300));
         }
 
         let statusMsg = `Successfully imported ${importedCount} new targets.`;
@@ -1034,12 +1369,12 @@ async function importFromAttackHistory() {
     }
 }
 
-
 // Export all data to JSON file
 function exportData() {
     const exportData = {
         targets: targets,
-        settings: settings
+        settings: settings,
+        notifications: notifications
     };
     
     const dataStr = JSON.stringify(exportData, null, 2);
@@ -1083,6 +1418,12 @@ function importData() {
                     if (toggleAlerts) toggleAlerts.checked = settings.alerts;
                 }
                 
+                if (parsedData.notifications && Array.isArray(parsedData.notifications)) {
+                    notifications = parsedData.notifications;
+                    localStorage.setItem(STORAGE_KEY_NOTIFICATIONS, JSON.stringify(notifications));
+                    renderNotifications();
+                }
+                
                 renderTargets();
                 alert('Data imported successfully!');
             } catch (error) {
@@ -1099,25 +1440,16 @@ function importData() {
 function clearAllData() {
     if (confirm('Are you sure you want to clear all target data? This cannot be undone!')) {
         targets = [];
+        settings = {"alerts": false, "lastUpdate": 0};
+        notifications = [];
         saveTargets();
+        saveSettings();
+        localStorage.setItem(STORAGE_KEY_NOTIFICATIONS, JSON.stringify(notifications));
         renderTargets();
-        alert('All target data has been cleared.');
+        renderNotifications();
+        if (toggleAlerts) toggleAlerts.checked = false;
+        alert('All data has been cleared.');
     }
-}
-
-// Add app notifications (replaces browser notifications)
-function createAppNotification(message, type) {
-    const notification = document.createElement('div');
-    notification.className = 'app-notification';
-    notification.textContent = message;
-    
-    document.body.appendChild(notification);
-    
-    // Auto-remove after a few seconds
-    setTimeout(() => {
-        notification.classList.add('fade-out');
-        setTimeout(() => notification.remove(), 500);
-    }, 5000);
 }
 
 // Check if DOM elements exist before using them
@@ -1126,10 +1458,3 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize app with proper DOM handling
     init();
 });
-
-// Request notification permissions on page load - DISABLED
-// if ('Notification' in window) {
-//     if (Notification.permission !== 'granted' && Notification.permission !== 'denied') {
-//         Notification.requestPermission();
-//     }
-// }

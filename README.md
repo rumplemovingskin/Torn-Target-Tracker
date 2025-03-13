@@ -33,7 +33,9 @@ A local web application for tracking and managing targets in Torn.
 ## Setup Instructions
 
 1. **Download the Files**
-   - Download all files into a directory on your computer
+   - Download the Files
+   - Click the green  button and select "Download ZIP"
+   - Unzip the download and open the folder.
 
 2. **Run the Application**
    - Open `index.html` in a web browser

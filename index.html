@@ -40,8 +40,18 @@
                     </div>
                 </div>
             </div>
+            <div class="header-bottom">
+                <div class="chain-status">
+                    <span class="chain-label">Chain:</span>
+                    <span id="current-chain">0</span>
+                    <span class="chain-label">Cooldown:</span>
+                    <span id="chain-cooldown">00:00:00</span>
+                    <button id="update-chain" class="btn-small">Update</button>
+                </div>
+            </div>
             <div class="nav-tabs">
                 <button class="tab-btn active" data-tab="targets">Targets</button>
+                <button class="tab-btn" data-tab="notifications">Notifications</button>
                 <button class="tab-btn" data-tab="settings">Settings</button>
                 <div class="status-container">
                     <span id="api-status" class="status-indicator">Not connected</span>
@@ -96,14 +106,18 @@
                         <p>No targets in your list yet. Add targets by ID or import from your attack history in Settings.</p>
                     </div>
                 </div>
-                
-                <div class="chain-tracker">
-                    <h2>Chain Status</h2>
-                    <div class="chain-info">
-                        <span>Current Chain: <span id="current-chain">0</span></span>
-                        <span>Chain Cooldown: <span id="chain-cooldown">00:00:00</span></span>
+            </div>
+            
+            <!-- Notifications Tab Content -->
+            <div class="tab-content" id="notifications-tab">
+                <div class="notifications-container">
+                    <div class="notifications-header">
+                        <h2>Recent Notifications</h2>
+                        <button id="clear-notifications" class="btn-small">Clear All</button>
                     </div>
-                    <button id="update-chain">Update Chain Status</button>
+                    <div id="notifications-list" class="notifications-list">
+                        <!-- Notifications will be inserted here dynamically -->
+                    </div>
                 </div>
             </div>
             
@@ -176,6 +190,7 @@
                 <button class="btn-attack">Attack</button>
                 <button class="btn-profile">Profile</button>
                 <button class="btn-favorite">Favorite</button>
+                <button class="btn-update-stats">Update Stats</button>
                 <button class="btn-remove">Remove</button>
             </div>
         </div>
