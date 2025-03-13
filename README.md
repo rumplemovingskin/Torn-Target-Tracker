@@ -93,3 +93,4 @@ The application requires these API permissions:
 ## Credits
 
 - Developed by BeauMcSwain
+
